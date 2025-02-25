@@ -30,12 +30,12 @@ This bot helps users receive real-time email alerts directly on Telegram while a
 ## 📂 Project Structure
 📂 Email-Alert-Bot/ │── 📄 fetch_email.py # Fetches emails, applies filtering, and sends alerts │── 📄 telegram_bot.py # Handles user interactions and configurations via Telegram │── 📄 requirements.txt # List of required dependencies │── 📄 README.md # Project documentation
 
-**🔐 Security Note**
+## 🔐 Security Note
 Use an App Password instead of your actual email password.
 Never hardcode sensitive credentials in your scripts.
 Store API keys securely (e.g., in an environment variable).
 
-**🛠️ Future Enhancements**
+## 🛠️ Future Enhancements
 ✅ Support for multiple email providers (Outlook, Yahoo, etc.).
 ✅ Add web-based dashboard for email management.
 ✅ Improve AI filtering with NLP techniques.
