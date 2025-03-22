@@ -16,17 +16,28 @@ def escape_markdown_v2(text):
     special_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(special_chars)}])', r'\\\1', text)
 
-# Function to extract plain text from HTML emails
+# Function to extract plain text from HTML emails while preserving structure
 def extract_text_from_html(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
-    return soup.get_text(separator="\n").strip()
+    
+    # Replace <br> tags with newlines
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+    
+    # Replace <p> tags with newlines
+    for p in soup.find_all("p"):
+        p.replace_with(p.get_text() + "\n\n")
+    
+    # Extract text and preserve line breaks
+    text = soup.get_text(separator="\n").strip()
+    return text
 
 # Function to clean and preprocess text
 def clean_text(text):
-    # Remove special characters and extra spaces
-    text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with a single space
-    text = re.sub(r'[^\w\s]', '', text)  # Remove special characters
-    return text.lower().strip()  # Convert to lowercase and strip leading/trailing spaces
+    # Remove excessive white spaces and line breaks
+    text = re.sub(r'\n\s*\n', '\n\n', text)  # Replace multiple newlines with a single newline
+    text = re.sub(r'[ \t]+', ' ', text)  # Replace multiple spaces/tabs with a single space
+    return text.strip()  # Strip leading/trailing spaces
 
 # Function to check if email matches keywords using TF-IDF and cosine similarity
 def matches_keywords(email_text, keywords):
@@ -54,7 +65,6 @@ def matches_keywords(email_text, keywords):
     # Check if any similarity score is above a threshold (e.g., 0.1)
     return any(score > 0.05 for score in cosine_similarities[0])
 
-
 # Connect to SQLite database
 conn = sqlite3.connect('user_preferences.db', check_same_thread=False)
 c = conn.cursor()
@@ -67,137 +77,130 @@ if 'keywords' not in [column[1] for column in columns]:
     conn.commit()
 
 # Fetch user credentials from the database
-c.execute("SELECT user_id, email, app_password, keywords FROM user_credentials")
+c.execute("SELECT user_id, email1, app_password1, email2, app_password2, keywords FROM user_credentials")
 user_credentials = c.fetchall()
 
-for user_id, email_addr, app_password, keywords in user_credentials:
-    try:
-        # Connect to Gmail IMAP server
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(email_addr, app_password)
-        mail.select("inbox")
-        print(f"✅ Connected to email server for {email_addr}.")
+for user_id, email1, app_password1, email2, app_password2, keywords in user_credentials:
+    emails = [(email1, app_password1)]
+    if email2 and app_password2:
+        emails.append((email2, app_password2))
 
-        # Search for unread emails
-        status, messages = mail.search(None, 'UNSEEN')
-        email_ids = messages[0].split()
+    for email_addr, app_password in emails:
+        try:
+            # Connect to Gmail IMAP server
+            mail = imaplib.IMAP4_SSL("imap.gmail.com")
+            mail.login(email_addr, app_password)
+            mail.select("inbox")
+            print(f"✅ Connected to email server for {email_addr}.")
 
-        if not email_ids:
-            print(f"📭 No new unread emails for {email_addr}.")
-            mail.logout()
-            continue
+            # Search for unread emails
+            status, messages = mail.search(None, 'UNSEEN')
+            email_ids = messages[0].split()
 
-        for email_id in email_ids:
-            try:
-                # Fetch the email
-                status, msg_data = mail.fetch(email_id, "(RFC822)")
+            if not email_ids:
+                print(f"📭 No new unread emails for {email_addr}.")
+                mail.logout()
+                continue
 
-                for response_part in msg_data:
-                    if isinstance(response_part, tuple):
-                        email_content = response_part[1]
+            for email_id in email_ids:
+                try:
+                    # Fetch the email
+                    status, msg_data = mail.fetch(email_id, "(RFC822)")
 
-                        # Ensure the email data is treated correctly
-                        if isinstance(email_content, bytes):
-                            msg = email.message_from_bytes(email_content)
-                        elif isinstance(email_content, str):
-                            msg = email.message_from_string(email_content)
-                        else:
-                            print(f"⚠️ Unexpected email content type: {type(email_content)}")
-                            continue  # Skip this email
+                    for response_part in msg_data:
+                        if isinstance(response_part, tuple):
+                            email_content = response_part[1]
+                            
 
-                        # Parse the email
-                        subject, encoding = decode_header(msg["Subject"])[0]
-                        if isinstance(subject, bytes):
-                            subject = subject.decode(encoding if encoding else "utf-8")
-                        sender = msg.get("From")
+                            # Ensure the email data is treated correctly
+                            if isinstance(email_content, bytes):
+                                msg = email.message_from_bytes(email_content)
+                            elif isinstance(email_content, str):
+                                msg = email.message_from_string(email_content)
+                            else:
+                                print(f"⚠️ Unexpected email content type: {type(email_content)}")
+                                continue  # Skip this email
 
-                        # Extract email body
-                        body = ""
-                        if msg.is_multipart():
-                            for part in msg.walk():
-                                content_type = part.get_content_type()
-                                content_disposition = str(part.get("Content-Disposition"))
+                            # Parse the email
+                            subject, encoding = decode_header(msg["Subject"])[0]
+                            if isinstance(subject, bytes):
+                                subject = subject.decode(encoding if encoding else "utf-8")
+                            sender = msg.get("From")
 
-                                # Get the email content (skip attachments)
-                                if "attachment" not in content_disposition:
-                                    try:
-                                        body_bytes = part.get_payload(decode=True)
-                                        if body_bytes:
-                                            body = body_bytes.decode(part.get_content_charset() or "utf-8")
-                                            
-                                            # Convert HTML emails to plain text
-                                            if content_type == "text/html":
-                                                body = extract_text_from_html(body)
-                                    except Exception as e:
-                                        print(f"⚠️ Error decoding email part: {e}")
-                                        body = "(Error reading email content)"
-                        else:
-                            try:
-                                body_bytes = msg.get_payload(decode=True)
-                                if body_bytes:
-                                    body = body_bytes.decode(msg.get_content_charset() or "utf-8")
-                                    
-                                    # Convert HTML emails to plain text
-                                    if msg.get_content_type() == "text/html":
-                                        body = extract_text_from_html(body)
-                            except Exception as e:
-                                print(f"⚠️ Error decoding email body: {e}")
-                                body = "(Error reading email content)"
+                            # Extract email body
+                            body = ""
+                            if msg.is_multipart():
+                                for part in msg.walk():
+                                    content_type = part.get_content_type()
+                                    content_disposition = str(part.get("Content-Disposition"))
 
-                        # Check if the email matches the keywords
-                        email_text = f"{subject} {body}"
-                        if not matches_keywords(email_text, keywords):
-                            print(f"📨 Email does not match keywords for {email_addr}.")
-                            continue
+                                    # Get the email content (skip attachments)
+                                    if "attachment" not in content_disposition:
+                                        try:
+                                            body_bytes = part.get_payload(decode=True)
+                                            if body_bytes:
+                                                body = body_bytes.decode(part.get_content_charset() or "utf-8")
+                                                
+                                                # Convert HTML emails to plain text while preserving structure
+                                                if content_type == "text/html":
+                                                    body = extract_text_from_html(body)
+                                        except Exception as e:
+                                            print(f"⚠️ Error decoding email part: {e}")
+                                            body = "(Error reading email content)"
+                            else:
+                                try:
+                                    body_bytes = msg.get_payload(decode=True)
+                                    if body_bytes:
+                                        body = body_bytes.decode(msg.get_content_charset() or "utf-8")
+                                        
+                                        # Convert HTML emails to plain text while preserving structure
+                                        if msg.get_content_type() == "text/html":
+                                            body = extract_text_from_html(body)
+                                except Exception as e:
+                                    print(f"⚠️ Error decoding email body: {e}")
+                                    body = "(Error reading email content)"
 
-                        # Escape MarkdownV2 characters for Telegram
-                        safe_subject = escape_markdown_v2(subject)
-                        safe_sender = escape_markdown_v2(sender)
-                        safe_body = escape_markdown_v2(body)
+                            # Clean up the body text to remove unnecessary white spaces
+                            body = clean_text(body)
 
-                        # Format the message for Telegram
-                        telegram_message = f"📩 *New Email Received\!*\n\n" \
-                                           f"📧 *From:* {safe_sender}\n" \
-                                           f"📌 *Subject:* {safe_subject}\n\n"
+                            # Check if the email matches the keywords
+                            email_text = f"{subject} {body}"
+                            if not matches_keywords(email_text, keywords):
+                                print(f"📨 Email does not match keywords for {email_addr}.")
+                                continue
 
-                        # Send the email details first
-                        print("🚀 Sending email details to Telegram...")
-                        telegram_api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                        payload = {
-                            "chat_id": user_id,
-                            "text": telegram_message,
-                            "parse_mode": "MarkdownV2"
-                        }
-                        response = requests.post(telegram_api_url, json=payload)
+                            # Escape MarkdownV2 characters for Telegram
+                            safe_subject = escape_markdown_v2(subject)
+                            safe_sender = escape_markdown_v2(sender)
+                            safe_body = escape_markdown_v2(body)
 
-                        if response.status_code == 200:
-                            print("✅ Email details sent!")
-                        else:
-                            print(f"❌ Failed to send email details. Response: {response.status_code}, {response.text}")
+                            # Format the message for Telegram
+                            telegram_message = f"📩 *New Email Received\!*\n\n" \
+                                               f"📧 *From:* {safe_sender}\n" \
+                                               f"📌 *Subject:* {safe_subject}\n\n" \
+                                               f"{safe_body}"
 
-                        # Split the email body into 4000-character chunks
-                        max_length = 4000
-                        body_chunks = [safe_body[i:i + max_length] for i in range(0, len(safe_body), max_length)]
-
-                        for chunk in body_chunks:
+                            # Send the email details first
+                            print("🚀 Sending email details to Telegram...")
+                            telegram_api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                             payload = {
                                 "chat_id": user_id,
-                                "text": chunk,
+                                "text": telegram_message,
                                 "parse_mode": "MarkdownV2"
                             }
                             response = requests.post(telegram_api_url, json=payload)
 
                             if response.status_code == 200:
-                                print("✅ Email body chunk sent!")
+                                print("✅ Email details sent!")
                             else:
-                                print(f"❌ Failed to send email body. Response: {response.status_code}, {response.text}")
+                                print(f"❌ Failed to send email details. Response: {response.status_code}, {response.text}")
 
-            except Exception as e:
-                print(f"❌ Error processing email ID {email_id}: {e}")
+                except Exception as e:
+                    print(f"❌ Error processing email ID {email_id}: {e}")
 
-        # Logout from the email server
-        mail.logout()
-        print(f"📤 Logged out from email server for {email_addr}.")
+            # Logout from the email server
+            mail.logout()
+            print(f"📤 Logged out from email server for {email_addr}.")
 
-    except Exception as e:
-        print(f"❌ Failed to connect to the mail server or login for {email_addr}: {e}")
+        except Exception as e:
+            print(f"❌ Failed to connect to the mail server or login for {email_addr}: {e}")
